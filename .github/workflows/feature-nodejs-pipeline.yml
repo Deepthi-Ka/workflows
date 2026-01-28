@@ -20,16 +20,17 @@ jobs:
       - name: list files
         run: ls -l
 
+     
+      - name: get the version
+        run: |
+          # if you store it in GITHUB_ENV, you can use in another steps.::9 takes 1st 9 chars.
+
+          echo "APP_VERSION=${GITHUB_SHA::9}" >> "$GITHUB_ENV" 
+
       - name: print inputs
         run:  | 
          echo ${{ inputs.project }}
          echo "version: ${APP_VERSION}"
-
-
-      - name: get the version
-        run: |
-          # if you store it in GITHUB_ENV, you can use in another steps.::9 takes 1st 9 chars.
-          echo "APP_VERSION=${GITHUB_SHA::9}" >> "$GITHUB_ENV" 
 
       - name: install dependencies
         run: npm install
