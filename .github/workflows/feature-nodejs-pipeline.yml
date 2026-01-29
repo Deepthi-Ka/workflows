@@ -1,6 +1,9 @@
 name: feature-nodejs-pipeline
+
 on:
-  workflow_call: #will be called by someone.should get inputs from caller.
+  # This workflow is a reusable workflow.
+  # It will be invoked by another workflow using `workflow_call`
+  workflow_call:
     inputs:
       project:
         required: true
@@ -11,41 +14,113 @@ on:
       environment:
         required: true
         type: string
+
+# Global environment variables available to all jobs & steps
 env:
-  ACC_ID: 485658242739       
+  ACC_ID: 485658242739
+
 jobs:
   feature-nodejs-pipeline:
+    # Run this job on a self-hosted GitHub Actions runner
     runs-on: self-hosted
+
     steps:
-      - name: checkout code
+      # Checkout source code from the caller repository
+      - name: Checkout code
         uses: actions/checkout@v6
-      - name: list files
+
+      # List files to verify repository contents
+      - name: List files
         run: ls -l
 
-     
-      - name: get the version
+      # Generate application version from Git commit SHA
+      # First 9 characters are commonly used as image version tags
+      - name: Get application version
         run: |
-          # if you store it in GITHUB_ENV, you can use in another steps.::9 takes 1st 9 chars.
+          echo "APP_VERSION=${GITHUB_SHA::9}" >> "$GITHUB_ENV"
 
-          echo "APP_VERSION=${GITHUB_SHA::9}" >> "$GITHUB_ENV" 
+      # Print received inputs and derived version
+      - name: Print inputs and version
+        run: |
+          echo "Project: ${{ inputs.project }}"
+          echo "Component: ${{ inputs.component }}"
+          echo "Version: ${APP_VERSION}"
 
-      - name: print inputs
-        run:  | 
-         echo ${{ inputs.project }}
-         echo "version: ${APP_VERSION}"
-
-      - name: install dependencies
+      # Install Node.js dependencies
+      - name: Install dependencies
         run: npm install
 
-      - name: run unit tests
-        run: echo "run unit tests"
+      # Run unit tests (placeholder for real tests)
+      - name: Run unit tests
+        id: unit_tests
+        run: echo "Running unit tests"
 
-      - name: docker build
+      - name: update unit tests status
+        if: always() #Runs no matter what (success / failure / cancelled). this is imp.even prev step failed, it should run.
+        uses: Deepthi-Ka/workflows/.github/actions/update-commit-status@main
+        with:
+          sha: ${{ github.sha }}
+          state: ${{ steps.unit_tests.outcome }} # success/failure/cancelled
+          context: UNIT_TESTS
+          description: "${{ steps.unit_tests.outcome }}"
+
+      # Build Docker image and tag it with ECR repository + version
+      - name: Docker build
+        id: docker_build
         run: |
-          docker build -t ${ACC_ID}.dkr.ecr.us-east-1.amazonaws.com/${{ inputs.project }}/${{ inputs.component }}:${APP_VERSION} .
+          docker build \
+            -t ${ACC_ID}.dkr.ecr.us-east-1.amazonaws.com/${{ inputs.project }}/${{ inputs.component }}:${APP_VERSION} \
+            .
           docker images
-     
-     # to push the code we have to authenticate to aws.
+
+      - name: docker build status
+        if: always()
+        uses: Deepthi-Ka/workflows/.github/actions/update-commit-status@main
+        with:
+          sha: ${{ github.sha }} 
+          state: ${{ steps.docker_build.outcome }}
+          context: docker_build
+          description: ${{ steps.docker_build.outcome }}
+
+      - name: Security Check (Dependabot + Trivy)
+        id: security_check
+        # env:
+        #   GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        shell: bash
+        run: |
+
+          echo "🔍 Running Trivy scan..."
+          trivy image \
+            --scanners vuln \
+            --severity HIGH,CRITICAL,MEDIUM \
+            --pkg-types os \
+            --exit-code 1 \
+            --format table \
+            ${ACC_ID}.dkr.ecr.us-east-1.amazonaws.com/${{ inputs.project }}/${{ inputs.component }}:${APP_VERSION}
+
+          TRIVY_RESULT=$?
+
+          if [ "$TRIVY_RESULT" -ne 0 ]; then
+            echo "❌ Trivy found vulnerabilities (HIGH/CRITICAL/MEDIUM)"
+            exit 1
+          fi
+
+          echo "✅ Trivy scan passed without blocking issues."
+
+      - name: Update scan status
+        if: always()
+        uses: Deepthi-Ka/workflows/.github/actions/update-commit-status@main
+        with:
+          sha: ${{ github.sha }}
+          state: ${{ steps.security_check.outcome }}     # success / failure / cancelled
+          context: SECURITY_CHECK
+          description: ${{ steps.security_check.outcome }}
+
+
+
+      # Configure AWS credentials for AWS CLI
+      # This sets AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
+      # so AWS CLI can authenticate with AWS services
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -53,10 +128,14 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
 
-      # but  reusable workflows can no access these secrets. we need to pass them 
-
-      - name: push image
+      # Authenticate Docker with Amazon ECR
+      # AWS CLI generates a temporary ECR login token using IAM credentials
+      - name: Login to Amazon ECR
         run: |
-          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${ACC_ID}.dkr.ecr.us-east-1.amazonaws.com
-          docker push ${ACC_ID}.dkr.ecr.us-east-1.amazonaws.com/${{ inputs.project }}/${{ inputs.component }}:${APP_VERSION}
+          aws ecr get-login-password --region us-east-1 \
+          | docker login --username AWS --password-stdin ${ACC_ID}.dkr.ecr.us-east-1.amazonaws.com
 
+      # Push the Docker image to Amazon ECR
+      - name: Push image to ECR
+        run: |
+          docker push ${ACC_ID}.dkr.ecr.us-east-1.amazonaws.com/${{ inputs.project }}/${{ inputs.component }}:${APP_VERSION}
